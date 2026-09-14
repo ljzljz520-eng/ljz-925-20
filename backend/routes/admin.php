@@ -11,6 +11,7 @@ use App\Response;
 use App\Validator;
 use App\Logger;
 use App\KeyManager;
+use App\SystemChecker;
 
 // 管理员认证中间件
 function requireAdminAuth() {
@@ -319,6 +320,30 @@ elseif ($path === 'api/admin/logs' && $method === 'GET') {
     }
 
     Response::jsonSuccess($result);
+}
+
+// GET /api/admin/system-check - Linux 部署自检（仅管理员）
+elseif ($path === 'api/admin/system-check' && $method === 'GET') {
+    $adminId = requireAdminAuth();
+
+    $report = SystemChecker::runAll();
+
+    // 记录管理员操作日志
+    Logger::logAdminOp($adminId, 'system_check', '执行部署环境自检：' . $report['summary']['fail'] . '项失败/' . $report['summary']['warn'] . '项警告');
+
+    Response::jsonSuccess($report, '自检完成');
+}
+
+// POST /api/admin/system-check/emergency-token - 生成应急自检链接（仅管理员）
+// 用于数据库异常导致无法登录时，在服务器本机/后台生成 5 分钟限时自检链接
+elseif ($path === 'api/admin/system-check/emergency-token' && $method === 'POST') {
+    $adminId = requireAdminAuth();
+
+    $issued = SystemChecker::issueEmergencyToken(300);
+
+    Logger::logAdminOp($adminId, 'system_check_token', '生成应急部署自检链接（5分钟有效）');
+
+    Response::jsonSuccess($issued, '应急自检链接已生成，5 分钟内有效');
 }
 
 // 未匹配的管理路由

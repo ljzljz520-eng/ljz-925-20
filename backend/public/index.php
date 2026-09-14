@@ -52,7 +52,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 // 设置响应头
 header('Content-Type: application/json; charset=utf-8');
 
+// 获取请求路径与方法（提前解析，便于在数据库初始化前处理运维探针）
+$requestUri = $_SERVER['REQUEST_URI'];
+$path = parse_url($requestUri, PHP_URL_PATH);
+$path = trim($path, '/');
+$method = $_SERVER['REQUEST_METHOD'];
+
 try {
+    // 伪静态运行时探测探针：在数据库初始化之前处理，
+    // 这样即使数据库/扩展异常，只要伪静态生效就能探测到。
+    // 公开访问，仅返回固定标记，不泄露任何敏感信息。
+    if ($path === 'api/deploy/rewrite-probe') {
+        Response::jsonSuccess(\App\SystemChecker::getProbe(), 'ok');
+    }
+
+    // 应急部署自检入口：不依赖数据库登录，使用服务器本机签发的限时令牌鉴权
+    if ($path === 'api/deploy/self-check') {
+        require __DIR__ . '/deploy-check.php';
+        exit;
+    }
+
     // 初始化数据库
     Database::initialize();
 
@@ -60,14 +79,6 @@ try {
     if (rand(1, 10) === 1) {
         Database::cleanup();
     }
-
-    // 获取请求路径
-    $requestUri = $_SERVER['REQUEST_URI'];
-    $path = parse_url($requestUri, PHP_URL_PATH);
-    $path = trim($path, '/');
-
-    // 获取请求方法
-    $method = $_SERVER['REQUEST_METHOD'];
 
     // 路由分发
     if (strpos($path, 'api/admin/') === 0) {

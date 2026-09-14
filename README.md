@@ -109,7 +109,7 @@ if_modified_since off;
 
 ### 管理后台
 
-- ✅ **管理员登录** - `admin / daniaoge`
+- ✅ **管理员登录** - 初始账号 `admin / daniaoge`（仅用于首次登录，上线前必须修改，见「默认账号处理」）
 - ✅ **批量生成卡密** - 自定义前缀、1-1000个、1-3650天
 - ✅ **批量封禁/解封/删除** - 实时生效
 - ✅ **导出卡密** - Excel（.xlsx，支持导出全部/导出选中）
@@ -150,7 +150,7 @@ docker-compose up -d --build
 
 - **用户前端**: http://localhost:3009/
 - **管理后台**: http://localhost:3009/admin/login
-- **默认管理员**: admin / daniaoge
+- **默认管理员**: admin / daniaoge ⚠️ 仅限首次登录，正式使用前请立即改密并删除 TEST 测试卡密
 - **测试卡密**: TEST00000001 ~ TEST00000010（详见TEST-KEYS.md）
 
 1. **查看日志**
@@ -163,6 +163,174 @@ docker-compose logs -f unified-app
 
 ```bash
 docker-compose down
+```
+
+## Linux 服务器直接部署（上传即用）
+
+除 Docker 外，本系统所有页面均为「免构建 PHP」，把代码上传到装有 Nginx/Apache + PHP-FPM 的 Linux 服务器（或宝塔 / 1Panel 等面板）即可运行。
+
+### 1. 环境要求
+
+| 组件 | 要求 | 说明 |
+| --- | --- | --- |
+| PHP | >= 8.0（推荐 8.2 / 8.3） | 需启用 FPM |
+| 扩展 | `pdo_sqlite`（必需）、`sqlite3`（建议） | 系统通过 PDO 访问 SQLite |
+| 函数 | `random_int` / `password_hash` / `hash_hmac` | PHP 内置，勿在 `disable_functions` 禁用 |
+| Web 服务器 | Nginx 或 Apache | 需配置伪静态（URL Rewrite） |
+| Composer | 仅首次部署需要 | 安装后端依赖（`vendor/` 已随仓库提供时可跳过） |
+
+验证命令：
+
+```bash
+php -v                 # 查看 PHP 版本
+php -m | grep -i sqlite  # 应能看到 pdo_sqlite、sqlite3
+```
+
+如缺少扩展：
+
+```bash
+# Debian / Ubuntu
+sudo apt install -y php-sqlite3
+sudo systemctl restart php8.3-fpm   # 按实际版本调整
+
+# CentOS / RHEL
+sudo yum install -y php-pdo php-sqlite3
+sudo systemctl restart php-fpm
+
+# 宝塔 / 1Panel：软件商店 → 对应 PHP → 安装扩展 → 打开 sqlite3 / pdo_sqlite
+```
+
+### 2. 上传后的目录结构与权限
+
+站点根目录建议直接指向 `php-frontend/public`；`includes`、`assets` 放在其上一级。统一容器布局如下（自行部署时保持同样的相对关系即可）：
+
+```text
+/var/www/html/            # 站点根目录 = php-frontend/public
+├── index.php  api.php  .htaccess
+├── assets/
+└── admin/                # = php-admin/public（管理后台，地址 /admin）
+/var/www/includes/        # = php-frontend/includes
+/var/www/admin-includes/  # = php-admin/includes
+/app/backend/             # 后端 API（含 data/ 数据库目录、vendor/）
+```
+
+**必须保证 PHP-FPM 运行用户（Debian/Ubuntu 多为 `www-data`，CentOS 多为 `nginx`/`apache`）对以下目录可写：**
+
+```bash
+# 以下路径请按实际部署位置替换
+WWW_USER=www-data
+
+# 1) 数据库目录（最关键：SQLite 的 app.db 及 WAL/SHM 文件都在这里创建）
+sudo mkdir -p /app/backend/data
+sudo chown -R $WWW_USER:$WWW_USER /app/backend/data
+sudo chmod 755 /app/backend/data
+
+# 已存在数据库文件时
+sudo chown $WWW_USER:$WWW_USER /app/backend/data/app.db*
+sudo chmod 644 /app/backend/data/app.db
+
+# 2) PHP / Web 日志目录
+sudo mkdir -p /var/log/php
+sudo chown -R $WWW_USER:$WWW_USER /var/log/php
+sudo chmod 755 /var/log/php
+
+# 3) 代码目录可读即可（不要给 777）
+sudo chown -R $WWW_USER:$WWW_USER /var/www /app/backend
+sudo find /var/www /app/backend -type d -exec chmod 755 {} \;
+sudo find /var/www /app/backend -type f -exec chmod 644 {} \;
+```
+
+> 注意：SQLite 启用了 WAL 模式，除 `app.db` 外还会生成 `app.db-wal`、`app.db-shm`，因此**可写权限要给到 data 目录本身**，只给文件可写是不够的。请勿将数据库目录设置为 `777`。
+
+Docker 部署时数据目录通过卷挂载，宿主机同样要可写：
+
+```bash
+mkdir -p ./data && chmod 755 ./data
+```
+
+### 3. 伪静态（URL Rewrite）配置
+
+前端、后台、API 都依赖「把不存在的路径转发到 PHP 入口」，伪静态未生效会出现：页面刷新 404、`/api/...` 请求 404、无法登录。
+
+**Nginx**（在站点 `server{}` 内添加；宝塔：站点设置 → 伪静态，粘贴即可）：
+
+```nginx
+root /var/www/html;
+index index.php;
+
+location /admin/ {
+    try_files $uri /admin/index.php?$query_string;
+}
+location = /admin {
+    return 301 /admin/;
+}
+location /assets/ {
+    alias /var/www/html/assets/;
+}
+location /api/admin/ {
+    rewrite ^/api/admin/(.*)$ /admin/api.php last;
+}
+location /api/ {
+    rewrite ^/api/(.*)$ /api.php last;
+}
+location ~ \.php$ {
+    fastcgi_pass 127.0.0.1:9000;          # 按实际 PHP-FPM 监听地址调整
+    fastcgi_index index.php;
+    fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    fastcgi_param HTTP_AUTHORIZATION $http_authorization;
+    include fastcgi_params;
+}
+location / {
+    try_files $uri /index.php?$query_string;
+}
+```
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+**Apache**：代码包 `public/.htaccess` 已自带重写规则，需启用 `mod_rewrite` 并允许覆盖：
+
+```bash
+sudo a2enmod rewrite && sudo systemctl restart apache2
+# 并在站点配置中设置 AllowOverride All
+```
+
+### 4. 默认账号处理（上线必做）
+
+系统首次初始化会写入种子数据，其中包含**默认管理员与测试卡密，仅限测试，正式使用前必须处理**：
+
+- 默认管理员：`admin` / `daniaoge`
+- 测试卡密：`TEST` 前缀（TEST00000001 ~ TEST00000020）
+
+请按以下顺序处理：
+
+1. 用默认账号登录后台后，**立即修改管理员密码**（建议同时新建一个非 `admin` 的管理员并停用默认账号）；
+2. 在「卡密管理」中删除全部 `TEST` 前缀的测试卡密；
+3. 自检页会自动检测「默认管理员账号 / 是否仍为初始密码」，未处理会报红；
+4. 生产环境务必配置 HTTPS，并建议为 `/admin` 路径增加 IP 白名单。
+
+### 5. 部署自检（后台「🩺 部署自检」页面）
+
+登录管理后台，侧边栏进入 **部署自检**（地址 `/admin/syscheck`），系统会在服务器端检测并对每项给出可直接复制的修复命令：
+
+- **PHP 版本**：是否 >= 8.0；
+- **SQLite3 / pdo_sqlite 扩展**：缺失时给出各发行版安装命令；
+- **数据库文件权限**：data 目录、`app.db` 文件是否存在、属主与读写权限、PDO 实际连通性；
+- **日志目录**：PHP `error_log` 目标目录与 Web 服务器日志目录是否可写；
+- **伪静态配置**：服务端检查 Nginx/Apache 重写配置，浏览器端再用探针**实测** URL Rewrite 是否真正生效；
+- **默认管理员账号**：是否仍是 `admin` / 初始密码；
+- 另含核心加密函数可用性、服务器时区等检查。
+
+安全说明：
+
+- 自检信息包含路径、版本、权限等，**仅登录管理员可见**（接口 `GET /api/admin/system-check` 有 Token + Session 双重鉴权，未登录返回 4001）；
+- **应急入口**：若数据库权限异常导致无法登录后台，可在服务器本机执行下面命令，生成一个 **5 分钟有效**的临时自检链接（不依赖数据库、不经过登录）：
+
+```bash
+php /app/backend/public/deploy-check.php issue
+# 输出形如：/api/deploy/self-check?token=<过期时间>.<HMAC签名>
+# 拼上域名在浏览器打开即可；令牌过期需重新生成，切勿外泄
 ```
 
 ## 系统架构
@@ -1242,7 +1410,9 @@ docker-compose logs > logs.txt
 
 #### 1. 生产环境配置
 
-- ✅ 修改默认管理员密码
+- ✅ 修改默认管理员密码（`admin / daniaoge`），建议同时更换默认用户名
+- ✅ 删除全部 TEST 前缀的种子测试卡密
+- ✅ 上线后在后台「🩺 部署自检」页面确认全部检查通过
 - ✅ 配置 HTTPS（Let's Encrypt）
 - ✅ 限制管理后台访问 IP
 - ✅ 启用防火墙（UFW/iptables）
@@ -1271,9 +1441,12 @@ ssl_prefer_server_ciphers on;
 #### 3. 数据库安全
 
 ```bash
-# 设置文件权限
+# 设置目录/文件属主与权限（www-data 替换为实际 PHP-FPM 运行用户）
+chown -R www-data:www-data data
 chmod 755 data
 chmod 644 data/app.db
+# 注意：SQLite 使用 WAL 模式，data 目录本身必须对 PHP 运行用户可写
+# （app.db-wal / app.db-shm 也在该目录创建），切勿仅给文件授权
 
 # 定期备份
 0 2 * * * cp /path/to/data/app.db /path/to/backup/app.db.$(date +\%Y\%m\%d)
@@ -1408,10 +1581,23 @@ docker-compose up -d --build
 
 ### 数据库权限问题
 
+SQLite 启用 WAL 模式，data 目录及 app.db 都要对 PHP-FPM 运行用户可写（Debian/Ubuntu 为 www-data）：
+
 ```bash
-chmod 755 data
-chmod 644 data/app.db
+sudo chown -R www-data:www-data data
+sudo chmod 755 data
+sudo chmod 644 data/app.db
+# 如已生成 WAL/SHM 文件，属主一并修正
+sudo chown www-data:www-data data/app.db-wal data/app.db-shm 2>/dev/null
 ```
+
+也可以登录后台「🩺 部署自检」页面，按数据库权限、伪静态等项目给出的修复命令逐项处理；
+后台无法登录时，在服务器执行 `php backend/public/deploy-check.php issue` 生成临时自检链接。
+
+### 伪静态 / 扩展缺失
+
+- 页面刷新或访问 `/api/...` 出现 404：Nginx/Apache 伪静态未生效，见上文「Linux 服务器直接部署 → 伪静态配置」。
+- 提示找不到 SQLite 驱动：安装 `pdo_sqlite`（建议同时安装 `sqlite3`）并重启 PHP-FPM。
 
 ### 查看容器日志
 
